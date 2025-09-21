@@ -17,6 +17,19 @@ namespace trait
     template <typename T>
     using remove_cvref_t = typename remove_cvref<T>::type;
 
+    template <typename T, typename = void>
+    struct is_equality_comparable : std::false_type
+    {
+    };
+
+    template <typename T>
+    struct is_equality_comparable<T, std::void_t<decltype(std::declval<T const &>() == std::declval<T const &>())>> : std::true_type
+    {
+    };
+
+    template <typename T>
+    inline constexpr bool is_equality_comparable_v = is_equality_comparable<T>::value;
+
     template <typename>
     inline constexpr bool always_false_v = false;
 
@@ -66,6 +79,7 @@ namespace variant_utils
     template <typename Head, typename... Ts>
     struct find_type_by_idx<0, Head, Ts...>
     {
+        // using type = trait::remove_cvref_t<Head>;
         using type = Head;
     };
     template <size_t id, typename Head, typename... Ts>
@@ -88,7 +102,7 @@ namespace variant_utils
     {
         union
         {
-            Head value;
+            trait::remove_cvref_t<Head> value;
             Storage<Ts...> next;
         };
         Storage() {}
@@ -125,22 +139,22 @@ namespace variant_utils
             return get_storage_value<id - 1, Ts...>(storage.next);
     }
 
-    template <typename T, typename... Ts>
-    void construct_variant_value(Storage<Ts...> &, T &&);
-    template <typename T, typename... Ts, std::enable_if_t<(find_idx_by_type<T, Ts...> == -1), int> = 0>
-    void construct_variant_value(Storage<T> &, T &&) { static_assert(trait::always_false_v<Ts...>, "Can't find type T in Ts...!"); }
+    template <typename Head, typename... Ts>
+    void construct_variant_value(Storage<Ts...> &, Head &&);
+    template <typename Head, typename... Ts, std::enable_if_t<(find_idx_by_type<Head, Ts...> == -1), int> = 0>
+    void construct_variant_value(Storage<Head> &, Head &&) { static_assert(trait::always_false_v<Ts...>, "Can't find type T in Ts...!"); }
     template <typename T>
     void construct_variant_value(Storage<T> &storage, T &&val)
     {
-        using type = trait::remove_cvref_t<T>;
-        *new (&storage.value) type(std::forward<T>(val));
+        using U = trait::remove_cvref_t<T>;
+        *new (&storage.value) U(std::forward<T>(val));
     }
     template <typename T, typename Head, typename... Ts>
     void construct_variant_value(Storage<Head, Ts...> &storage, T &&val)
     {
-        using type = trait::remove_cvref_t<T>;
-        if constexpr (std::is_same_v<type, Head>)
-            *new (&storage.value) type(std::forward<T>(val));
+        using U = trait::remove_cvref_t<T>;
+        if constexpr (std::is_same_v<U, Head>)
+            *new (&storage.value) U(std::forward<T>(val));
         else
             construct_variant_value<T, Ts...>(storage.next, std::forward<T>(val));
     }
@@ -152,8 +166,9 @@ namespace variant_utils
     template <size_t id, typename Head, typename... Ts>
     void destroy_variant_value(Storage<Head, Ts...> &storage)
     {
+        using U = trait::remove_cvref_t<Head>;
         if constexpr (id == 0)
-            storage.value.~Head();
+            storage.value.~U();
         else
             destroy_variant_value<id - 1>(storage.next);
     }
@@ -198,15 +213,6 @@ public:
     }
 
 public:
-    template <size_t id>
-    bool hold() const { return id == type_idx; }
-
-    template <typename T, typename U = trait::remove_cvref_t<T>>
-    bool hold() const
-    {
-        return std::is_same_v<U, variant_utils::find_type_by_idx_t<type_idx, Ts...>>;
-    }
-
     template <size_t id>
     bool holds_alternative() const { return id == type_idx; }
 
@@ -258,12 +264,12 @@ private:
     using constructor_func_type = void (*)(Variant *, const Variant &);
     using move_constructor_func_type = void (*)(Variant *, Variant &&);
 
-    template <std::size_t... I>
+    template <size_t... I>
     static constexpr std::array<constructor_func_type, sizeof...(Ts)>
     make_constructor_table_impl(std::index_sequence<I...>) { return {&construct_from_impl<I>...}; }
     static constexpr auto make_constructor_table() { return make_constructor_table_impl(std::make_index_sequence<sizeof...(Ts)>{}); }
 
-    template <std::size_t... I>
+    template <size_t... I>
     static constexpr std::array<move_constructor_func_type, sizeof...(Ts)>
     make_move_constructor_table_impl(std::index_sequence<I...>) { return {&construct_from_impl_move<I>...}; }
     static constexpr auto make_move_constructor_table() { return make_move_constructor_table_impl(std::make_index_sequence<sizeof...(Ts)>{}); }
@@ -308,6 +314,25 @@ public:
         variant_utils::construct_variant_value(m_storage, std::forward<T>(val));
         type_idx = idx;
     }
+
+    // template <
+    //     typename T,
+    //     typename... Args,
+    //     std::enable_if_t<(variant_utils::find_idx_by_type<T, Ts...> != -1), int> = 0>
+    // explicit Variant(variant_utils::in_place_type_t<T>, Args &&...args)
+    // {
+    //     constexpr auto idx = variant_utils::find_idx_by_type<T, Ts...>;
+    //     new (&(Variant::get<idx>())) T(std::forward<Args>(args)...);
+    //     type_idx = idx;
+    // }
+
+    // template <size_t I, typename... Args>
+    // explicit Variant(variant_utils::in_place_index_t<I>, Args &&...args)
+    // {
+    //     using T = variant_utils::find_type_by_idx_t<I, Ts...>;
+    //     new (&(Variant::get<I>())) T(std::forward<Args>(args)...);
+    //     type_idx = I;
+    // }
 
 public:
     Variant(const Variant &other)
@@ -368,6 +393,67 @@ public:
         other.type_idx = null_type;
 
         return *this;
+    }
+
+public:
+    using compare_func_type = bool (*)(const void *, const void *);
+
+    template <size_t I>
+    static bool compare_value_func_constructor(const void *self_storage_ptr, const void *other_storage_ptr)
+    {
+        // 将 void* 指针转换回具体的 Storage 类型
+        const auto &self_storage = *static_cast<const variant_utils::Storage<Ts...> *>(self_storage_ptr);
+        const auto &other_storage = *static_cast<const variant_utils::Storage<Ts...> *>(other_storage_ptr);
+
+        // 使用 get_storage_value 获取具体的值并进行比较
+        using type = variant_utils::find_type_by_idx_t<I, Ts...>;
+        if constexpr (trait::is_equality_comparable_v<type>)
+            return variant_utils::get_storage_value<I>(self_storage) == variant_utils::get_storage_value<I>(other_storage);
+        else
+            return false;
+    }
+
+    template <size_t... I>
+    static constexpr std::array<compare_func_type, sizeof...(Ts)>
+    make_compare_table_impl(std::index_sequence<I...>) { return {&compare_value_func_constructor<I>...}; }
+
+    static constexpr auto make_compare_table() { return make_compare_table_impl(std::make_index_sequence<sizeof...(Ts)>{}); }
+
+    constexpr static auto compare_func_table = make_compare_table();
+
+    bool operator==(const Variant &other) const noexcept
+    {
+        constexpr bool all_types_are_comparable = (trait::is_equality_comparable_v<Ts> && ...);
+        static_assert(
+            all_types_are_comparable,
+            "Variant::operator== requires all alternative types to be equality-comparable.");
+
+        if (type_idx != other.type_idx)
+            return false;
+        if (this->type_idx == null_type)
+            return true;
+        return compare_func_table[type_idx](&this->m_storage, &other.m_storage);
+    }
+
+    template <typename T> // 注意：这里我们不再需要 U
+    bool operator==(const T &other) const noexcept
+    {
+        using U = trait::remove_cvref_t<T>;
+
+        static_assert(
+            trait::is_equality_comparable_v<U>,
+            "The type being compared against Variant must be equality-comparable.");
+
+        if (!holds_alternative<U>())
+            return false;
+
+        constexpr auto idx = variant_utils::find_idx_by_type<U, Ts...>;
+        using type_in_variant = variant_utils::find_type_by_idx_t<idx, Ts...>;
+        static_assert(
+            trait::is_equality_comparable_v<type_in_variant>,
+            "The type held by the Variant is not equality-comparable.");
+
+        return get<U>() == other;
     }
 };
 
